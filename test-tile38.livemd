@@ -1,0 +1,326 @@
+# Tile38 - A Livebook-based Introduction
+
+```elixir
+Mix.install([
+  {:plug_cowboy, "~> 2.6"},
+  {:req, "~> 0.3.4"},
+  {:redix, "~> 1.2"},
+  {:kino, "~> 0.8.0"},
+  {:maplibre, "~> 0.1.3"},
+  {:kino_maplibre, "~> 0.1.7"},
+  {:jason, "~> 1.4"},
+  {:vega_lite, "~> 0.1.6"},
+  {:kino_vega_lite, "~> 0.1.7"}
+])
+```
+
+## Introduction
+
+This is a guide to using [Tile38](https://tile38.com/) in Elixir. It
+uses [Livebook](https://livebook.dev/) to interact with the in-memory, real-time spatial database. The goal is to give a high-level overview of Tile38's capabilities with interactive snippets you can run on your own machine.
+
+> Tile38 is an open source (MIT licensed), in-memory geolocation data store, spatial index, and realtime geofencing server. It supports a variety of object types including lat/lon points, bounding boxes, XYZ tiles, Geohashes, and GeoJSON.
+> 
+> --<cite>Tile38.com</cite>
+
+[Redix](https://hex.pm/packages/redix), the pure Elixir-based Redis client, will be used in this Livebook as the main API to interface with Tile38. This is a low-level client that works well with the RESP protocol. Tile38 uses the Redis RESP protocol natively.
+
+> The architecture is very simple: when you issue commands to Redis (via command/3 or pipeline/3), the Redix process sends the command to Redis right away and is immediately able to send new commands. When a response arrives from Redis, only then the Redix process replies to the caller with the response. This pattern avoids blocking the Redix process for each request (until a response arrives), increasing the performance of this driver.
+> 
+> --<cite>hexdocs.pm/redix/Redix.html</cite>
+
+Additional dependencies are installed to help with visualization, HTTP handling, JSON parsing, etc. Three of the depedencies provide geographic data and visualization support:
+
+* Elixir binding to the MapLibre Style Specification
+* Kino MapLibre widget.
+* [geo](https://hex.pm/packages/geo) package
+
+## Prerequisites
+
+This Livebook assumes you have a local Tile38-server available and running. Installation instructions can be found on the Tile38 [website](https://tile38.com/topics/installation).
+
+## Connection
+
+Ensure the set-up code cell has evaluated and that all packages installed successfully. 
+The command `Redix.start_link()` starts an Elixir process that connects to Tile38. Each Elixir process started with this function maps to a client TCP connection to the specified Tile38 server.
+
+Hover over the cell and click to evaluate the code cell. You should see `:ok, #PID` returned on success.
+
+```elixir
+{:ok, conn} = Redix.start_link(host: "localhost", port: 9851)
+```
+
+Next, try to send a `PING` command to the server. A `PONG` value should be returned in the cell's output.
+
+```elixir
+Redix.command!(conn, ["PING"])
+```
+
+```elixir
+Redix.command!(conn, ["FLUSHDB"])
+```
+
+## Basic Operations
+
+Now that we have a successful connection, let's issue a few commands to the Tile38-server. We will start by setting/getting a simple POINT object named "truck1" in the "fleet" collection.
+
+```elixir
+Redix.command!(conn, ["SET", "fleet", "truck001", "POINT", 33.32, 122.423])
+```
+
+The GET command will return a GeoJSON object.
+
+```elixir
+Redix.command!(conn, ["GET", "fleet", "truck001"])
+```
+
+As mentioned in the introduction, Tile38 uses the RESP protocol. The cell below will output the raw RESP protocol string for any command sent by the client.
+
+```elixir
+iodata_get = Redix.Protocol.pack(["GET", "fleet", "truck001"])
+IO.iodata_to_binary(iodata_get)
+```
+
+## Command Pipelining
+
+Pipelines are just lists of commands sent all at once to Tile38. A list of responses will be returned. They can be used in your connected client via `Redix.pipeline/2,3`:
+
+```elixir
+pipe =
+  Redix.pipeline!(conn, [
+    ["SET", "extents", "area99", "BOUNDS", 30, -110, 40, -100],
+    ["SET", "extents", "area33", "HASH", "9tbnthxzr"],
+    ["SCAN", "fleet"],
+    ["STATS", "fleet"]
+  ])
+  |> Kino.Tree.new()
+```
+
+<!-- livebook:{"branch_parent_index":4} -->
+
+## Geofence Webhooks
+
+Tile38 can send webhooks which makes it a great fit for event-based systems. Similar to the channel-based geofencing, a webhook points to a geofenced search. It has many supported endpoints (HTTP, SQS, Kafka, AMQP, MQTT, NATS, etc ). We will set-up a very minimal HTTP server using the PlugCowboy Elixir library to test the webhook command. Evaluating this cell will start a web server on port 4000 with a route defined at /receive to log the notifications payload by Tile38.
+
+```elixir
+defmodule Server do
+  use Plug.Router
+  plug(Plug.Logger)
+  plug(:match)
+
+  plug(Plug.Parsers,
+    parsers: [:json],
+    pass: ["application/json"],
+    json_decoder: Jason
+  )
+
+  plug(:dispatch)
+
+  post "/receiver" do
+    # Prints JSON POST body
+    IO.inspect(conn.body_params)
+    send_resp(conn, 200, "Webhook Received!")
+  end
+end
+
+plug_cowboy = {Plug.Cowboy, plug: Server, scheme: :http, port: 4000}
+{:ok, _} = Supervisor.start_link([plug_cowboy], name: Server.Supervisor, strategy: :one_for_one)
+Process.sleep(:infinity)
+```
+
+<!-- livebook:{"branch_parent_index":4} -->
+
+## Webhook Notifications
+
+Next, we create a geofence webhook pointing to our new route on `localhost:4000/receiver`
+
+```elixir
+Redix.command(
+  conn,
+  ~w(SETHOOK factory http://localhost:4000/receiver NEARBY fleet FENCE POINT 33.5123 -112.2693 500)
+)
+```
+
+Send a SET command with a point location to the "fleet" collection. This will trigger a notification to the endpoint we built above. The notification payload is logged below the web server code.
+
+```elixir
+Redix.command(conn, ~w(SET fleet bus28 POINT 33.460 -112.260))
+```
+
+<!-- livebook:{"branch_parent_index":4} -->
+
+## Geofence Channels
+
+Tile38 can turn any search into a geofence monitor by adding the FENCE keyword to the search. If you are familiar with how pub/sub works in Redis, it is very similar. Tile38 uses Redis-compatible pubsub channels to listen for geofence notifications.
+
+<!-- livebook:{"break_markdown":true} -->
+
+We created a branched section in the notebook so the geofencing examples evaluate in a seperate process. This is an example of a basic geofencing workflow using the PubSub functionality that uses Redix as a Redis client for publishing messages.
+
+1. Start a new PubSub connection and redix client to handle the pubsub functionality.
+2. Create a channel to a geofenced search
+3. Subscribe using the new PubSub connection.
+4. Once subscribed to the channel, a SET command is sent to the server to trigger the notification.
+5. The JSON geofence notification event is output after the cell is evaluated.
+
+```elixir
+# 1.Start PubSub and Connect
+{:ok, pubsub} = Redix.PubSub.start_link(host: "localhost", port: 9851)
+{:ok, client} = Redix.start_link(host: "localhost", port: 9851)
+
+# Create a channel to a geofenced search
+Redix.command(
+  client,
+  ~w(SETCHAN warehouse NEARBY fleet FENCE DETECT inside POINT 33.462 -112.268 6000)
+)
+```
+
+Run the `NotificationPrint` module in <B>Channel Notifications</B> section below and then evaluate the cell with the SET command. This will trigger a geofence notification. The responses from Tile38 will appear in the output of the `NotificationPrint` module.
+
+```elixir
+# send a SET command to trigger a geofence notification
+Redix.command(client, ~w(SET fleet bus466 POINT 33.460 -112.260))
+```
+
+<!-- livebook:{"branch_parent_index":4} -->
+
+## Channel Notifications
+
+The geofence notification event is output after the cell above is run.
+
+```elixir
+defmodule NotificationPrint do
+  def subscribe(host, port, channel) do
+    {:ok, pubsub} = Redix.PubSub.start_link(host: host, port: port)
+    {:ok, ref} = Redix.PubSub.subscribe(pubsub, channel, self())
+    receive_messages(pubsub, ref)
+  end
+
+  def receive_messages(pubsub, ref) do
+    receive do
+      {:redix_pubsub, ^pubsub, ^ref, :message, %{channel: _, payload: payload}} ->
+        payload |> IO.inspect()
+    end
+
+    receive_messages(pubsub, ref)
+  end
+end
+
+NotificationPrint.subscribe("localhost", 9851, "warehouse")
+```
+
+## Working with GeoJSON
+
+The geo package, installed as a dependency for the MapLibre bindings, can work with geospatial features. This includes encoding and decoding GeoJSON features and geometries. It also works with standard WKT and WKB geometries.
+
+Below, we build a point and polygon feature to update two collections (test_geojson and city). This shows basic geometry construction using Geo's structs.
+
+<!-- livebook:{"break_markdown":true} -->
+
+### Point Feature Type and Geometry Collections
+
+```elixir
+# build up a geo struct manually, encode to geoJSON/JSON, 
+# Send SET command to create/update key in Tile38
+car0001 =
+  %Geo.Point{coordinates: {-111.8902, 33.4377}, properties: %{speed: 55}}
+  |> Geo.JSON.encode!(feature: true)
+  |> Jason.encode!()
+
+Redix.command!(conn, ["SET", "test_geojson", "car0001", "OBJECT", car0001])
+Redix.command!(conn, ["GET", "test_geojson", "car0001"])
+```
+
+### Polygon Geometry Type
+
+```elixir
+city_poly = %Geo.Polygon{
+  coordinates: [
+    [
+      {-111.9787, 33.4411},
+      {-111.8902, 33.4377},
+      {-111.8950, 33.2892},
+      {-111.9739, 33.2932},
+      {-111.9787, 33.4411}
+    ]
+  ],
+  properties: %{desc: "Somewhere in City of Tempe"}
+}
+
+city_feature =
+  Geo.JSON.encode!(city_poly, feature: true)
+  |> Jason.encode!()
+
+Redix.command!(conn, ["SET", "city", "tempe", "OBJECT", city_feature])
+Redix.command!(conn, ["GET", "city", "tempe"])
+```
+
+## Visualization with MapLibre
+
+Livebook has a map widget called Kino.Maplibre that provides interactive web mapping funtionaility within the livebook environment. It wraps the Elixir binding to the MapLibre specification. This allows us to visualize our Geojson features that are present in the livebook. We will make a quick map here, but for better examples check out the "intro-to-maplibre" in the example notebooks that come with the Livebook install.
+
+Let's load a few more points and run a Tile38 command to return some search results. This will give us some objects to plot on the Kino.Maplibre widget.
+
+```elixir
+# Points with properties to GeoJSON FeatureCollection map
+# build up a geo structs manually, add to collection
+loc0002 = %Geo.Point{coordinates: {-111.895, 33.2892}, properties: %{score: 70}}
+loc0003 = %Geo.Point{coordinates: {-111.9739, 33.2932}, properties: %{score: 63}}
+loc0004 = %Geo.Point{coordinates: {-111.9787, 33.4411}, properties: %{score: 40}}
+
+gc =
+  %Geo.GeometryCollection{geometries: [loc0002, loc0003, loc0004]}
+  |> Geo.JSON.encode!(feature: true)
+  |> Jason.encode!()
+
+Redix.command!(conn, ["SET", "facility", "locs", "OBJECT", gc])
+```
+
+```elixir
+# query Tile38 --> Return Results, build %geo structs to 
+# visualize using the Kino.MapLbre widget
+qry_result =
+  Redix.command!(conn, ["SCAN", "facility"])
+  |> List.flatten()
+  |> List.last()
+  |> Jason.decode!()
+  |> Geo.JSON.decode!()
+
+# |> Kino.Tree.new()
+```
+
+<!-- livebook:{"attrs":{"center":"-111.8950, 33.2892","layers":[{"cluster_colors":["#51bbd6","#f1f075","#f28cb1"],"cluster_max":750,"cluster_min":100,"coordinates_format":"lng_lat","layer_color":"#c62a2a","layer_opacity":1,"layer_radius":10,"layer_source":"qry_result","layer_source_query":null,"layer_source_query_strict":null,"layer_type":"circle","source_coordinates":null,"source_latitude":null,"source_longitude":null,"source_type":"geo"},{"cluster_colors":["#51bbd6","#f1f075","#f28cb1"],"cluster_max":750,"cluster_min":100,"coordinates_format":"lng_lat","layer_color":"#000000","layer_opacity":1,"layer_radius":5,"layer_source":"🌎 Geocoding","layer_source_query":"tempe, arizona","layer_source_query_strict":"city","layer_type":"circle","source_coordinates":null,"source_latitude":null,"source_longitude":null,"source_type":"query"},{"cluster_colors":["#51bbd6","#f1f075","#f28cb1"],"cluster_max":750,"cluster_min":100,"coordinates_format":"lng_lat","layer_color":"#000000","layer_opacity":1,"layer_radius":5,"layer_source":"city_poly","layer_source_query":null,"layer_source_query_strict":null,"layer_type":"line","source_coordinates":null,"source_latitude":null,"source_longitude":null,"source_type":"geo"}],"ml_alias":"Elixir.MapLibre","style":"street (non-commercial)","zoom":9},"chunks":null,"kind":"Elixir.KinoMapLibre.MapCell","livebook_object":"smart_cell"} -->
+
+```elixir
+MapLibre.new(style: :street, center: {-111.895, 33.2892}, zoom: 9)
+|> MapLibre.add_geo_source("qry_result", qry_result)
+|> MapLibre.add_geocode_source("tempe_arizona_city", "tempe, arizona", :city)
+|> MapLibre.add_geo_source("city_poly", city_poly)
+|> MapLibre.add_layer(
+  id: "qry_result_circle_1",
+  source: "qry_result",
+  type: :circle,
+  paint: [circle_color: "#c62a2a", circle_radius: 10, circle_opacity: 1]
+)
+|> MapLibre.add_layer(
+  id: "tempe_arizona_city_circle_2",
+  source: "tempe_arizona_city",
+  type: :circle,
+  paint: [circle_color: "#000000", circle_radius: 5, circle_opacity: 1]
+)
+|> MapLibre.add_layer(
+  id: "city_poly_line_3",
+  source: "city_poly",
+  type: :line,
+  paint: [line_color: "#000000", line_opacity: 1]
+)
+```
+
+## Attributions
+
+### Credits
+
+* [Tile38 Docs](https://tile38.com/)
+* [Livebook](https://livebook.dev/)
+* [Redix Docs](https://hexdocs.pm/redix/Redix.html)
+* [geo Package Docs](https://hex.pm/packages/geo)
