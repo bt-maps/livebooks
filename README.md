@@ -11,9 +11,6 @@ is to use the Livebook desktop app that you can find [on its website][livebook].
 
 This is a guide to using Tile38 in Elixir. It uses Livebook to interact with the in-memory, real-time spatial database. The goal is to give a high-level overview of Tile38's capabilities with interactive snippets you can run on your own machine.
 
-### 02 — PostGIS
-
-Coming Soon
 
 
 
