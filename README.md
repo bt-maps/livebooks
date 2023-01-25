@@ -1,11 +1,5 @@
 # Livebooks
 
-
-
-This is a short interactive guide to asynchronous data processing in Elixir. It
-uses [Livebook][livebook] to show interactive Elixir snippets that you can run
-on your own machine.
-
 ## How Do I Use This?
 
 Using the badges below, you can import them to your computer and run and explore them there. My recommendation
