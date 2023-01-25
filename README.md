@@ -7,7 +7,7 @@ is to use the Livebook desktop app that you can find [on its website][livebook].
 
 ### Tile38 - A Livebook-based Introduction
 
-[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2Fwhatyouhide%2Fguide_async_processing_in_elixir%2Fmain%2F01-processes.livemd)
+[![Run in Livebook](https://livebook.dev/badge/v1/black.svg)](https://livebook.dev/run?url=https%3A%2F%2Fgithub.com%2Fbt-maps%2Flivebooks%2Fblob%2Fmain%2Ftest-tile38.livemd)
 
 This is a guide to using Tile38 in Elixir. It uses Livebook to interact with the in-memory, real-time spatial database. The goal is to give a high-level overview of Tile38's capabilities with interactive snippets you can run on your own machine.
 
